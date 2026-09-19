@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-gu"
+version = "0.1.0"
+description = "Pure standard-library cryptography toolkit: RFC/NIST-verified primitives plus deterministic attack implementations for research and teaching."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["cryptography", "teaching", "research", "aes", "chacha20", "poly1305", "gcm", "blake2", "scrypt", "rsa", "oaep", "pss"]
+
+[project.optional-dependencies]
+# Only needed for ad-hoc cross-checking against native implementations.
+oracle = ["cryptography>=41", "pycryptodome>=3.19"]
+
+[tool.setuptools.packages.find]
+include = ["crypto_gu*"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "SIM", "UP007", "I001"]
+ignore = ["B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
