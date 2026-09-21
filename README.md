@@ -23,11 +23,14 @@
 | `crypto_gu.asymmetric.rsa` | RSA 密钥生成与教科书式原语（配合攻击层做因子恢复） |
 | `crypto_gu.asymmetric.pkcs1` | MGF1、RSAES-OAEP、RSASSA-PSS（RFC 8017） |
 | `crypto_gu.number_theory` | 素性检验、模逆、CRT、Tonelli-Shanks、Pollard rho / p-1、Fermat、BSGS |
+| `crypto_gu.ecc` | 素域椭圆曲线点运算（短 Weierstrass）、点阶、曲线阶、EC BSGS |
 | `crypto_gu.rng.mt19937` | MT19937 生成器与从输出反推内部状态 |
 | `crypto_gu.encoding` / `crypto_gu.padding` | hex / base32/58/64/85、XOR、Morse、BCD；PKCS#7 等填充方案 |
 | `crypto_gu.constant_time` | 无提前退出的比较、无分支 select |
-| `crypto_gu.attacks.aes` | ECB byte-at-a-time、CBC padding oracle |
+| `crypto_gu.attacks.aes` | ECB byte-at-a-time、CBC padding oracle、最后一轮 DFA 密钥恢复 |
 | `crypto_gu.attacks.rsa` | Wiener、Fermat、Pollard p-1、共模攻击、Hastad broadcast |
+| `crypto_gu.attacks.ecc` | Pohlig-Hellman（光滑阶群）、invalid-curve 小子群恢复 |
+| `crypto_gu.attacks.timing` | 从逐位计时恢复模幂指数、位分类 |
 
 ## 快速上手
 
@@ -73,6 +76,18 @@ pkcs1.pss_verify_signature(key, b"document", signature, "sha256", 32)
 from crypto_gu.attacks.rsa import wiener, common_modulus
 
 wiener(n, e)  # d 过小时由 (n, e) 恢复私钥
+
+# 椭圆曲线原语
+from crypto_gu import ecc
+
+G = (5, 1)  # y^2 = x^3 + 2x + 2 over F_17 上的生成元
+Q = ecc.point_mul(17, 2, 9, G)
+
+# 最后一轮 DFA：每个状态字节一次故障即可恢复 AES-128 主密钥
+from crypto_gu.attacks.aes import dfa_last_round
+
+master = dfa_last_round(good_ct, [(pos, faulty_ct) for pos in range(16)],
+                        check=lambda k: k == expected)
 ```
 
 ## 验证背书
@@ -91,6 +106,9 @@ wiener(n, e)  # d 过小时由 (n, e) 恢复私钥
 | scrypt | RFC 7914 §12 全 4 组 | `hashlib.scrypt`（OpenSSL `kdf` 已另行交叉验证） |
 | RSAES-OAEP / RSASSA-PSS | RFC 8017（嵌入固定密钥与密文/签名向量） | `cryptography`、`pycryptodome` 双向 |
 | MT19937 | 参考实现输出序列 | 状态恢复回环 |
+| 椭圆曲线点运算 / 阶 | 教材曲线链式验证（含 Hasse 界） | 与 number_theory BSGS 互验 |
+| DFA（AES-128 最后一轮） | FIPS-197 A.1 密钥扩展回环 | 故障注入模拟器端到端 |
+| Pohlig-Hellman / invalid-curve | CRT 残差与直接 BSGS 互验 | 曲线阶分解构造子群 |
 
 ## 测试
 
@@ -98,7 +116,7 @@ wiener(n, e)  # d 过小时由 (n, e) 恢复私钥
 python3 -m unittest discover -s tests -q
 ```
 
-当前 214 个测试约 2 分钟跑完；耗时集中在 scrypt（RFC 7914 §12 大参数组）与 CBC padding oracle 攻击测试。测试自带全部向量，不需要任何第三方库；`[oracle]` extra 仅用于自行做交叉验证。
+当前 239 个测试在 3 分钟内跑完；耗时集中在 scrypt（RFC 7914 §12 大参数组）、CBC padding oracle 与 invalid-curve 攻击测试。测试自带全部向量，不需要任何第三方库；`[oracle]` extra 仅用于自行做交叉验证。
 
 ## 局限声明
 

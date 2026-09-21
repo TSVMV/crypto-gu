@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-gu"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure standard-library cryptography toolkit: RFC/NIST-verified primitives plus deterministic attack implementations for research and teaching."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,8 +1,7 @@
 """Deterministic AES attack recipes.
 
-Two classic oracle attacks on misconfigured AES, both deterministic and
-non-brute-force over the key space: they call an oracle once per secret
-byte and reconstruct plaintext byte by byte.
+Classic oracle and fault attacks on misconfigured AES, all deterministic
+and non-brute-force over the key space.
 
 - :func:`ecb_byte_at_a_time` — recovers the unknown suffix of an ECB
   encryption when the attacker controls data placed between a fixed
@@ -17,9 +16,19 @@ byte and reconstruct plaintext byte by byte.
 
       oracle(previous || block) -> True if decrypting ``block`` against
       ``previous`` yields valid PKCS#7 padding
+
+- :func:`dfa_last_round` — recovers the AES-128 master key from
+  differential fault analysis: for each state byte of the final round,
+  one ciphertext encrypted with a known single-byte disturbance of that
+  byte. Requires roughly one faulty ciphertext per key byte (or two for
+  an ambiguity-free result without a validity check).
 """
 
 from __future__ import annotations
+
+from itertools import product
+
+from crypto_gu.symmetric import aes
 
 BLOCK = 16
 
@@ -212,3 +221,117 @@ def cbc_padding_oracle(block_decrypt, iv, ciphertext, block_size=BLOCK):
         out += bytes(r ^ p for r, p in zip(recovered, previous))
         previous = block
     return bytes(out)
+
+
+def _fault_out_pos(pos: int) -> int:
+    """Column-major state position -> its position after ShiftRows.
+
+    ``_shift_rows`` in :mod:`crypto_gu.symmetric.aes` moves the byte at
+    ``(row, col)`` to column ``(col - row) % 4``.
+    """
+    r, col = pos % 4, pos // 4
+    return r + 4 * ((col - r) % 4)
+
+
+def invert_key_schedule(last_round_key: bytes) -> bytes:
+    """Invert the AES-128 key schedule: final round key -> master key.
+
+    Forward expansion builds word ``w[i]`` from ``w[i-4]`` (plus a
+    RotWord/SubWord/Rcon transform every fourth word); walking backwards
+    from ``w[40..43]`` (the round-10 key) undoes it exactly.
+    """
+    if len(last_round_key) != 16:
+        raise ValueError("AES-128 schedule inversion needs a 16-byte round key")
+    words = [None] * 44
+    for i in range(4):
+        words[40 + i] = list(last_round_key[4 * i:4 * i + 4])
+    for i in range(43, 3, -1):
+        if i % 4 == 0:
+            t = words[i - 1][1:] + words[i - 1][:1]      # RotWord
+            t = [aes.SBOX[b] for b in t]                 # SubWord
+            t[0] ^= aes._RCON[i // 4 - 1]
+            words[i - 4] = [words[i][j] ^ t[j] for j in range(4)]
+        else:
+            words[i - 4] = [words[i][j] ^ words[i - 1][j] for j in range(4)]
+    return bytes(b for w in words[:4] for b in w)
+
+
+def _last_round_candidates(good_ct: bytes, faulty_ct: bytes, out_pos: int,
+                           delta: int) -> set:
+    """K10-byte candidates at ``out_pos`` from one fault pair.
+
+    The fault XORs ``delta`` into one state byte before the final SubBytes,
+    so ``good_ct[j] ^ K == SBOX[s]`` and ``faulty_ct[j] ^ K == SBOX[s ^ delta]``
+    at every output byte ``j`` touched by that fault.
+    """
+    target = good_ct[out_pos] ^ faulty_ct[out_pos]
+    if target == 0:
+        raise ValueError("fault did not change the ciphertext byte at position %d"
+                         % out_pos)
+    cands = set()
+    for k in range(256):
+        s = aes.INV_SBOX[good_ct[out_pos] ^ k]
+        if aes.SBOX[s ^ delta] == faulty_ct[out_pos] ^ k:
+            cands.add(k)
+    return cands
+
+
+def dfa_last_round(good_ct: bytes, faults, delta: int = 1, check=None):
+    """Recover the AES-128 master key by differential fault analysis.
+
+    Fault model: during one encryption, a single byte of the state entering
+    the final round (SubBytes -> ShiftRows -> AddRoundKey) is XORed with
+    ``delta``, and the faulty ciphertext is observed.
+
+    ``faults`` is a sequence of ``(pos, faulty_ct)`` pairs where ``pos`` is
+    the disturbed state byte (0..15, column-major) and ``faulty_ct`` the
+    resulting ciphertext of the same plaintext that produced ``good_ct``.
+    A fault may also be a ``(pos, faulty_ct, fault_delta)`` triple to
+    override the global ``delta`` for that fault. Repeating a position with
+    a second faulty ciphertext from a different delta sharpens the
+    per-byte candidate set from ~2-4 down to a single value.
+
+    ``check`` is an optional ``callable(master_key) -> bool`` (e.g. a known
+    plaintext/ciphertext pair) used to disambiguate when several round-key
+    combinations remain; without it the function insists on a unique
+    combination and returns ``None`` otherwise.
+
+    Returns the 16-byte master key, or ``None`` when the candidates do not
+    determine it.
+    """
+    if len(good_ct) != BLOCK:
+        raise ValueError("good_ct must be a single 16-byte block")
+    per_pos = {}
+    for fault in faults:
+        if len(fault) == 3:
+            pos, faulty_ct, fault_delta = fault
+        else:
+            pos, faulty_ct = fault
+            fault_delta = delta
+        if not 0 <= pos < BLOCK:
+            raise ValueError("fault position %d out of range" % pos)
+        if len(faulty_ct) != BLOCK:
+            raise ValueError("faulty ciphertexts must be 16-byte blocks")
+        out = _fault_out_pos(pos)
+        cands = _last_round_candidates(good_ct, faulty_ct, out, fault_delta)
+        if pos in per_pos:
+            per_pos[pos] &= cands
+        else:
+            per_pos[pos] = cands
+    if set(per_pos) != set(range(BLOCK)):
+        raise ValueError("need at least one fault at each of the 16 positions")
+
+    ordered = [per_pos[pos] for pos in range(BLOCK)]
+    total = 1
+    for c in ordered:
+        total *= len(c)
+    if check is None and total > 1:
+        return None  # ambiguous; supply check= or repeat the faults
+    for combo in product(*ordered):
+        k10 = bytearray(BLOCK)
+        for pos, k in zip(range(BLOCK), combo):
+            k10[_fault_out_pos(pos)] = k
+        master = invert_key_schedule(bytes(k10))
+        if check is None or check(master):
+            return master
+    return None
